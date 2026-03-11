@@ -1,0 +1,16 @@
+{
+  "projectId": "prj_Tz2sUrhb4DMhvbHxlnfSxDPiVggn",
+  "orgId": "team_RyE9W6IRKIbGxyj0060FOp9z",
+  "projectName": "todo-mern-frontend",
+  "settings": {
+    "createdAt": 1773217566381,
+    "framework": "vite",
+    "devCommand": null,
+    "installCommand": null,
+    "buildCommand": null,
+    "outputDirectory": null,
+    "rootDirectory": null,
+    "directoryListing": false,
+    "nodeVersion": "24.x"
+  }
+}
