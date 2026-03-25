@@ -1,6 +1,6 @@
 {
   "rewrites": [
-    { "source": "/api/:path*", "destination": "http://3.111.52.14:8800/api/:path*" },
+    { "source": "/api/:path*", "destination": "http://ec2-51-20-37-218.eu-north-1.compute.amazonaws.com:8800/api/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
