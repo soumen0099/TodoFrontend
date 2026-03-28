@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
+import toast from 'react-hot-toast'
 import api from '../api'
 
 export default function LoginPage() {
@@ -13,9 +14,12 @@ export default function LoginPage() {
     try {
       const { data } = await api.post('/auth/login', form)
       localStorage.setItem('token', data.token)
+      toast.success('Welcome back!')
       navigate('/dashboard')
     } catch (err) {
-      setError(err.response?.data?.message || 'Login failed')
+      const msg = err.response?.data?.message || 'Login failed';
+      setError(msg)
+      toast.error(msg)
     }
   }
 

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
+import toast from 'react-hot-toast'
 import api from '../api'
 
 export default function RegisterPage() {
@@ -13,9 +14,12 @@ export default function RegisterPage() {
     try {
       const { data } = await api.post('/auth/register', form)
       localStorage.setItem('token', data.token)
+      toast.success('Account created successfully!')
       navigate('/dashboard')
     } catch (err) {
-      setError(err.response?.data?.message || 'Registration failed')
+      const msg = err.response?.data?.message || 'Registration failed';
+      setError(msg)
+      toast.error(msg)
     }
   }
 

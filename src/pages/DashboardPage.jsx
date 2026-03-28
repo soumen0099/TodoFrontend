@@ -1,15 +1,19 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import DatePicker from 'react-datepicker'
+import 'react-datepicker/dist/react-datepicker.css'
+import toast from 'react-hot-toast'
+import { isBefore, startOfDay, format } from 'date-fns'
 import api from '../api'
 
-const COLORS = ['#7c6ff7','#ec4899','#22c55e','#f59e0b','#38bdf8','#f43f5e','#a78bfa']
+const COLORS = ['#7c6ff7', '#ec4899', '#22c55e', '#f59e0b', '#38bdf8', '#f43f5e', '#a78bfa']
 
 function spawnConfetti(x, y) {
   for (let i = 0; i < 14; i++) {
     const el = document.createElement('div')
     el.className = 'confetti-piece'
     el.style.left = `${x + (Math.random() - 0.5) * 80}px`
-    el.style.top  = `${y}px`
+    el.style.top = `${y}px`
     el.style.background = COLORS[Math.floor(Math.random() * COLORS.length)]
     el.style.animationDelay = `${Math.random() * 0.3}s`
     el.style.transform = `rotate(${Math.random() * 360}deg)`
@@ -18,19 +22,19 @@ function spawnConfetti(x, y) {
   }
 }
 
-export default function DashboardPage() {
-  const [todos, setTodos]       = useState([])
-  const [filter, setFilter]     = useState('all')
-  const [search, setSearch]     = useState('')
+export default function DashboardPage({ theme, toggleTheme }) {
+  const [todos, setTodos] = useState([])
+  const [filter, setFilter] = useState('all')
+  const [search, setSearch] = useState('')
   const [newTitle, setNewTitle] = useState('')
-  const [newDesc, setNewDesc]   = useState('')
+  const [newDesc, setNewDesc] = useState('')
   const [priority, setPriority] = useState('medium')
+  const [dueDate, setDueDate] = useState(null)
   const [editTodo, setEditTodo] = useState(null)
-  const [allDone, setAllDone]   = useState(false)
-  const [user, setUser]         = useState(null)
-  const [loading, setLoading]   = useState(true)
+  const [allDone, setAllDone] = useState(false)
+  const [user, setUser] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
-  const [toast, setToast]       = useState('')
   const navigate = useNavigate()
   const checkRefs = useRef({})
 
@@ -55,10 +59,10 @@ export default function DashboardPage() {
   }, [])
 
   // Stats
-  const total     = todos.length
+  const total = todos.length
   const completed = todos.filter(t => t.completed).length
-  const pending   = total - completed
-  const pct       = total === 0 ? 0 : Math.round((completed / total) * 100)
+  const pending = total - completed
+  const pct = total === 0 ? 0 : Math.round((completed / total) * 100)
 
   // Filtered + searched list
   const visible = todos.filter(t => {
@@ -73,16 +77,16 @@ export default function DashboardPage() {
     if (!newTitle.trim()) return
     setSubmitting(true)
     try {
-      const { data } = await api.post('/todos', { title: newTitle.trim(), description: newDesc.trim(), priority })
+      const { data } = await api.post('/todos', { title: newTitle.trim(), description: newDesc.trim(), priority, dueDate })
       if (data.newTodo) {
         setTodos(prev => [data.newTodo, ...prev])
-        setNewTitle(''); setNewDesc(''); setPriority('medium')
+        setNewTitle(''); setNewDesc(''); setPriority('medium'); setDueDate(null)
         setAllDone(false)
+        toast.success('Todo added!')
       }
     } catch (err) {
       const msg = err.response?.data?.message || 'Failed to add task. Is backend running?'
-      setToast(msg)
-      setTimeout(() => setToast(''), 3000)
+      toast.error(msg)
     } finally {
       setSubmitting(false)
     }
@@ -93,21 +97,28 @@ export default function DashboardPage() {
     const current = todos.find(t => t._id === id)
     if (!current) return
     const newCompleted = !current.completed
+
+    // Optimistic Update
+    const updated = todos.map(t => t._id === id ? { ...current, completed: newCompleted } : t)
+    setTodos(updated)
+
+    if (newCompleted) {
+      toast.success('Task completed!', { icon: '🎉' })
+      const rect = (e?.currentTarget || e?.target)?.getBoundingClientRect()
+      if (rect) spawnConfetti(rect.left + rect.width / 2, rect.top)
+      const allNowDone = updated.every(t => t.completed)
+      if (allNowDone && updated.length > 0) setAllDone(true)
+    } else {
+      toast.success('Task reopened')
+      setAllDone(false)
+    }
+
     try {
       const { data } = await api.put(`/todos/${id}`, { title: current.title, description: current.description, completed: newCompleted })
-      const updated = todos.map(t => t._id === id ? { ...current, ...data.todo } : t)
-      setTodos(updated)
-      if (newCompleted) {
-        const rect = (e?.currentTarget || e?.target)?.getBoundingClientRect()
-        if (rect) spawnConfetti(rect.left + rect.width / 2, rect.top)
-        const allNowDone = updated.every(t => t.completed)
-        if (allNowDone && updated.length > 0) setAllDone(true)
-      } else {
-        setAllDone(false)
-      }
+      setTodos(prev => prev.map(t => t._id === id ? { ...t, ...data.todo } : t))
     } catch (err) {
-      setToast('Failed to update task.')
-      setTimeout(() => setToast(''), 3000)
+      setTodos(todos)
+      toast.error('Failed to update task. Reverting...')
     }
   }
 
@@ -117,10 +128,10 @@ export default function DashboardPage() {
       await api.delete(`/todos/${id}`)
       const updated = todos.filter(t => t._id !== id)
       setTodos(updated)
+      toast.success('Deleted!')
       setAllDone(updated.length > 0 && updated.every(t => t.completed))
     } catch (err) {
-      setToast('Failed to delete task.')
-      setTimeout(() => setToast(''), 3000)
+      toast.error('Failed to delete task.')
     }
   }
 
@@ -131,13 +142,15 @@ export default function DashboardPage() {
       const { data } = await api.put(`/todos/${editTodo._id}`, {
         title: editTodo.title,
         description: editTodo.description,
-        completed: editTodo.completed
+        completed: editTodo.completed,
+        priority: editTodo.priority,
+        dueDate: editTodo.dueDate
       })
-      setTodos(todos.map(t => t._id === editTodo._id ? { ...t, ...data.todo, priority: editTodo.priority } : t))
+      setTodos(todos.map(t => t._id === editTodo._id ? { ...t, ...data.todo, priority: editTodo.priority, dueDate: editTodo.dueDate } : t))
+      toast.success('Saved!')
       setEditTodo(null)
     } catch (err) {
-      setToast('Failed to save changes.')
-      setTimeout(() => setToast(''), 3000)
+      toast.error('Failed to save changes.')
     }
   }
 
@@ -162,13 +175,6 @@ export default function DashboardPage() {
   return (
     <div className="app">
 
-      {/* Error Toast */}
-      {toast && (
-        <div style={{ position:'fixed', top:20, right:20, background:'#f43f5e', color:'#fff', padding:'12px 20px', borderRadius:12, zIndex:9999, fontWeight:600, fontSize:14, boxShadow:'0 8px 24px rgba(0,0,0,0.4)' }}>
-          ⚠️ {toast}
-        </div>
-      )}
-
       {/* Navbar */}
       <nav className="nav">
         <div className="nav-left">
@@ -176,6 +182,13 @@ export default function DashboardPage() {
           <span className="nav-name">TaskFlow</span>
         </div>
         <div className="nav-right">
+          <button
+            onClick={toggleTheme}
+            className="p-2 rounded-full border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-yellow-400 hover:bg-slate-100 dark:hover:bg-slate-700 transition duration-300 flex items-center justify-center"
+            title="Toggle Dark Mode"
+          >
+            {theme === 'dark' ? '☀️' : '🌙'}
+          </button>
           <span className="nav-username">Hey, {username} 👋</span>
           <div className="nav-avatar">{username[0]}</div>
           <button className="btn-ghost" onClick={handleLogout}>Logout</button>
@@ -197,10 +210,12 @@ export default function DashboardPage() {
 
         {/* Greeting */}
         <div className="greeting">
-          <h1 className="greeting-title">
-            Good work, <span>{username}</span>!
+          <h1 className="greeting-title" style={{ color: theme === 'dark' ? '#f1f5f9' : '#0f172a', transition: 'color 0.3s' }}>
+            Good work, <span style={{ color: theme === 'dark' ? '#818cf8' : '#6366f1', transition: 'color 0.3s' }}>{username}</span>!
           </h1>
-          <p className="greeting-sub">Here's what's on your plate today.</p>
+          <p className="greeting-sub" style={{ color: theme === 'dark' ? '#94a3b8' : '#475569', transition: 'color 0.3s' }}>
+            Here's what's on your plate today.
+          </p>
 
           {/* Progress bar */}
           <div className="progress-wrap">
@@ -265,7 +280,7 @@ export default function DashboardPage() {
             />
             <div className="priority-row">
               <label>Priority:</label>
-              {['high','medium','low'].map(p => (
+              {['high', 'medium', 'low'].map(p => (
                 <button
                   key={p} type="button"
                   className={`p-btn ${p} ${priority === p ? 'active' : ''}`}
@@ -275,13 +290,24 @@ export default function DashboardPage() {
                 </button>
               ))}
             </div>
+            <div className="add-row !mt-3">
+              <DatePicker
+                selected={dueDate}
+                onChange={(date) => setDueDate(date)}
+                placeholderText="Set due date (optional)"
+                className="input !py-2 !w-full"
+                dateFormat="MMM d, yyyy"
+                isClearable
+                wrapperClassName="!w-full"
+              />
+            </div>
           </form>
         </div>
 
         {/* Toolbar */}
         <div className="toolbar">
           <div className="filter-tabs">
-            {[['all','All'],['active','Active'],['done','Done']].map(([val, label]) => (
+            {[['all', 'All'], ['active', 'Active'], ['done', 'Done']].map(([val, label]) => (
               <button key={val} className={`f-tab ${filter === val ? 'active' : ''}`} onClick={() => setFilter(val)}>
                 {label}
               </button>
@@ -311,30 +337,38 @@ export default function DashboardPage() {
               <p className="empty-sub">{search ? `No tasks match "${search}"` : 'Add a task above to get started!'}</p>
             </div>
           ) : (
-            visible.map(todo => (
-              <div key={todo._id} className={`todo pri-${todo.priority || 'medium'} ${todo.completed ? 'done' : ''}`}>
-                <div
-                  className={`check ${todo.completed ? 'checked' : ''}`}
-                  onClick={(e) => handleToggle(todo._id, e)}
-                  ref={el => checkRefs.current[todo._id] = el}
-                >
-                  {todo.completed && '✓'}
-                </div>
+            visible.map(todo => {
+              const overdue = todo.dueDate && !todo.completed && isBefore(new Date(todo.dueDate), startOfDay(new Date()));
+              return (
+                <div key={todo._id} className={`todo pri-${todo.priority || 'medium'} ${todo.completed ? 'done' : ''} ${overdue ? 'overdue' : ''}`}>
+                  <div
+                    className={`check ${todo.completed ? 'checked' : ''}`}
+                    onClick={(e) => handleToggle(todo._id, e)}
+                    ref={el => checkRefs.current[todo._id] = el}
+                  >
+                    {todo.completed && '✓'}
+                  </div>
 
-                <div className="todo-body">
-                  <p className="todo-title">{todo.title}</p>
-                  <div className="todo-meta">
-                    {todo.description && <span className="todo-desc">{todo.description}</span>}
-                    <span className={`badge ${todo.priority || 'medium'}`}>{todo.priority || 'medium'}</span>
+                  <div className="todo-body">
+                    <p className="todo-title">{todo.title}</p>
+                    <div className="todo-meta">
+                      {todo.description && <span className="todo-desc">{todo.description}</span>}
+                      <span className={`badge ${todo.priority || 'medium'}`}>{todo.priority || 'medium'}</span>
+                      {todo.dueDate && (
+                        <span className={`badge ${overdue ? 'high' : ''}`} style={!overdue ? { background: 'var(--surface2)', color: 'var(--t2)', borderColor: 'var(--border)' } : {}}>
+                          📅 {format(new Date(todo.dueDate), 'MMM d, yyyy')}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="todo-actions">
+                    <button className="ico edt" onClick={() => setEditTodo({ ...todo })} title="Edit">✏️</button>
+                    <button className="ico del" onClick={() => handleDelete(todo._id)} title="Delete">🗑</button>
                   </div>
                 </div>
-
-                <div className="todo-actions">
-                  <button className="ico edt" onClick={() => setEditTodo({ ...todo })} title="Edit">✏️</button>
-                  <button className="ico del" onClick={() => handleDelete(todo._id)} title="Delete">🗑</button>
-                </div>
-              </div>
-            ))
+              )
+            })
           )}
         </div>
 
@@ -363,7 +397,7 @@ export default function DashboardPage() {
             </div>
             <div className="priority-row">
               <label>Priority:</label>
-              {['high','medium','low'].map(p => (
+              {['high', 'medium', 'low'].map(p => (
                 <button
                   key={p} type="button"
                   className={`p-btn ${p} ${editTodo.priority === p ? 'active' : ''}`}
@@ -372,6 +406,18 @@ export default function DashboardPage() {
                   {p === 'high' ? '🔴' : p === 'medium' ? '🟡' : '🟢'} {p}
                 </button>
               ))}
+            </div>
+            <div className="input-wrap">
+              <label className="input-label">Due Date</label>
+              <DatePicker
+                selected={editTodo.dueDate ? new Date(editTodo.dueDate) : null}
+                onChange={(date) => setEditTodo({ ...editTodo, dueDate: date })}
+                placeholderText="No due date"
+                className="input !w-full"
+                dateFormat="MMM d, yyyy"
+                isClearable
+                wrapperClassName="!w-full"
+              />
             </div>
             <div className="modal-actions">
               <button className="btn-cancel" onClick={() => setEditTodo(null)}>Cancel</button>
