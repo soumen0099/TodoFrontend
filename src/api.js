@@ -1,11 +1,16 @@
 import axios from 'axios'
 
 const productionApiUrl = 'https://todobackend-2-afpf.onrender.com/api'
+const configuredApiUrl = (import.meta.env.VITE_API_URL || '').trim()
+const shouldUseConfiguredUrl =
+  configuredApiUrl && (import.meta.env.DEV || configuredApiUrl !== '/api')
 
 const api = axios.create({
-  baseURL:
-    import.meta.env.VITE_API_URL ||
-    (import.meta.env.DEV ? '/api' : productionApiUrl),
+  baseURL: shouldUseConfiguredUrl
+    ? configuredApiUrl
+    : import.meta.env.DEV
+      ? '/api'
+      : productionApiUrl,
 })
 
 // Automatically attach token to every request
