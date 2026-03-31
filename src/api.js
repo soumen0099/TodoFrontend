@@ -2,10 +2,13 @@ import axios from 'axios'
 
 const productionApiUrl = 'https://todobackend-2-afpf.onrender.com/api'
 const envApiUrl = (import.meta.env.VITE_API_URL || '').trim()
+const isAbsoluteHttpUrl = /^https?:\/\//i.test(envApiUrl)
 
 // In development: use /api (proxied to localhost:8800 by vite.config.js)
 // In production: use direct Render backend URL
-const baseURL = envApiUrl || (import.meta.env.DEV ? '/api' : productionApiUrl)
+const baseURL = import.meta.env.DEV
+  ? (envApiUrl || '/api')
+  : (isAbsoluteHttpUrl ? envApiUrl : productionApiUrl)
 
 const api = axios.create({ baseURL })
 
