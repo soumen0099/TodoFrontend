@@ -1,12 +1,53 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import DatePicker from 'react-datepicker'
 import 'react-datepicker/dist/react-datepicker.css'
 import toast from 'react-hot-toast'
-import { isBefore, startOfDay, format } from 'date-fns'
+import { isBefore, startOfDay, format, subDays, isSameDay } from 'date-fns'
+import { DndContext, PointerSensor, closestCenter, useSensor, useSensors } from '@dnd-kit/core'
+import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import { ResponsiveContainer, PieChart, Pie, Cell, Tooltip, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts'
 import api from '../api'
+import { disconnectSocket, getSocket } from '../socket'
 
 const COLORS = ['#7c6ff7', '#ec4899', '#22c55e', '#f59e0b', '#38bdf8', '#f43f5e', '#a78bfa']
+const CATEGORIES = ['work', 'personal', 'shopping']
+const CATEGORY_LABELS = {
+  work: 'Work',
+  personal: 'Personal',
+  shopping: 'Shopping'
+}
+const DASHBOARD_USER_CACHE_KEY = 'taskflow_cached_user'
+const DASHBOARD_TODOS_CACHE_KEY = 'taskflow_cached_todos'
+
+function readDashboardCache() {
+  try {
+    const cachedUserRaw = localStorage.getItem(DASHBOARD_USER_CACHE_KEY)
+    const cachedTodosRaw = localStorage.getItem(DASHBOARD_TODOS_CACHE_KEY)
+    const cachedUser = cachedUserRaw ? JSON.parse(cachedUserRaw) : null
+    const cachedTodos = cachedTodosRaw ? JSON.parse(cachedTodosRaw) : []
+    return {
+      user: cachedUser,
+      todos: Array.isArray(cachedTodos) ? cachedTodos : []
+    }
+  } catch {
+    return { user: null, todos: [] }
+  }
+}
+
+function writeDashboardCache(nextUser, nextTodos) {
+  try {
+    if (nextUser) {
+      localStorage.setItem(DASHBOARD_USER_CACHE_KEY, JSON.stringify(nextUser))
+    }
+    if (Array.isArray(nextTodos)) {
+      localStorage.setItem(DASHBOARD_TODOS_CACHE_KEY, JSON.stringify(nextTodos))
+    }
+  } catch {
+    // No-op: local cache write failures should not block app usage
+  }
+}
 
 function spawnConfetti(x, y) {
   for (let i = 0; i < 14; i++) {
@@ -22,6 +63,65 @@ function spawnConfetti(x, y) {
   }
 }
 
+function SortableTodoItem({ todo, draggableEnabled, onToggle, onEdit, onDelete, checkRefs }) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging
+  } = useSortable({ id: todo._id, disabled: !draggableEnabled })
+
+  const overdue = todo.dueDate && !todo.completed && isBefore(new Date(todo.dueDate), startOfDay(new Date()))
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`todo pri-${todo.priority || 'medium'} ${todo.completed ? 'done' : ''} ${overdue ? 'overdue' : ''} ${isDragging ? 'dragging' : ''}`}
+      {...attributes}
+      {...listeners}
+    >
+      <div
+        className={`check ${todo.completed ? 'checked' : ''}`}
+        onClick={(e) => {
+          e.stopPropagation()
+          onToggle(todo._id, e)
+        }}
+        ref={el => checkRefs.current[todo._id] = el}
+      >
+        {todo.completed && '✓'}
+      </div>
+
+      <div className="todo-body">
+        <p className="todo-title">{todo.title}</p>
+        <div className="todo-meta">
+          {todo.description && <span className="todo-desc">{todo.description}</span>}
+          <span className={`badge ${todo.priority || 'medium'}`}>{todo.priority || 'medium'}</span>
+          <span className={`badge category-badge cat-${todo.category || 'personal'}`}>
+            {CATEGORY_LABELS[todo.category || 'personal']}
+          </span>
+          {todo.dueDate && (
+            <span className={`badge ${overdue ? 'high' : ''}`} style={!overdue ? { background: 'var(--surface2)', color: 'var(--t2)', borderColor: 'var(--border)' } : {}}>
+              📅 {format(new Date(todo.dueDate), 'MMM d, yyyy')}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="todo-actions" onClick={(e) => e.stopPropagation()}>
+        <button className="ico edt" onClick={() => onEdit(todo)} title="Edit">✏️</button>
+        <button className="ico del" onClick={() => onDelete(todo._id)} title="Delete">🗑</button>
+      </div>
+    </div>
+  )
+}
+
 export default function DashboardPage({ theme, toggleTheme }) {
   const [todos, setTodos] = useState([])
   const [filter, setFilter] = useState('all')
@@ -29,14 +129,29 @@ export default function DashboardPage({ theme, toggleTheme }) {
   const [newTitle, setNewTitle] = useState('')
   const [newDesc, setNewDesc] = useState('')
   const [priority, setPriority] = useState('medium')
+  const [category, setCategory] = useState('personal')
   const [dueDate, setDueDate] = useState(null)
   const [editTodo, setEditTodo] = useState(null)
   const [allDone, setAllDone] = useState(false)
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
+  const [savingOrder, setSavingOrder] = useState(false)
+  const [offlineMode, setOfflineMode] = useState(!navigator.onLine)
   const navigate = useNavigate()
   const checkRefs = useRef({})
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
+
+  useEffect(() => {
+    const goOnline = () => setOfflineMode(false)
+    const goOffline = () => setOfflineMode(true)
+    window.addEventListener('online', goOnline)
+    window.addEventListener('offline', goOffline)
+    return () => {
+      window.removeEventListener('online', goOnline)
+      window.removeEventListener('offline', goOffline)
+    }
+  }, [])
 
   // Fetch logged-in user + todos on mount
   useEffect(() => {
@@ -48,21 +163,86 @@ export default function DashboardPage({ theme, toggleTheme }) {
       api.get('/todos')
     ])
       .then(([meRes, todosRes]) => {
-        setUser(meRes.data.user)
-        setTodos(Array.isArray(todosRes.data.todos) ? todosRes.data.todos : [])
+        const nextUser = meRes.data.user
+        const nextTodos = Array.isArray(todosRes.data.todos) ? todosRes.data.todos : []
+        setUser(nextUser)
+        setTodos(nextTodos)
+        writeDashboardCache(nextUser, nextTodos)
       })
       .catch(() => {
+        const cached = readDashboardCache()
+        if (cached.user || cached.todos.length > 0) {
+          setUser(cached.user)
+          setTodos(cached.todos)
+          setOfflineMode(true)
+          toast('Offline mode: showing cached tasks.', { icon: '📱' })
+          return
+        }
         localStorage.removeItem('token')
         navigate('/login')
       })
       .finally(() => setLoading(false))
   }, [])
 
+  useEffect(() => {
+    const token = localStorage.getItem('token')
+    if (!token) return
+
+    const socket = getSocket(token)
+    if (!socket) return
+
+    const onTodosSync = (payload) => {
+      if (Array.isArray(payload?.todos)) {
+        setTodos(payload.todos)
+      }
+    }
+
+    socket.on('todos:sync', onTodosSync)
+
+    return () => {
+      socket.off('todos:sync', onTodosSync)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (user || todos.length > 0) {
+      writeDashboardCache(user, todos)
+    }
+  }, [user, todos])
+
   // Stats
   const total = todos.length
   const completed = todos.filter(t => t.completed).length
   const pending = total - completed
   const pct = total === 0 ? 0 : Math.round((completed / total) * 100)
+  const completionData = [
+    { name: 'Completed', value: completed, color: '#22c55e' },
+    { name: 'Pending', value: pending, color: '#f59e0b' }
+  ]
+
+  const weeklyProgressData = useMemo(() => {
+    const today = startOfDay(new Date())
+    const last7Days = Array.from({ length: 7 }, (_, idx) => subDays(today, 6 - idx))
+
+    return last7Days.map((day) => {
+      const dayTodos = todos.filter((todo) => {
+        if (!todo.createdAt) return false
+        const createdAt = new Date(todo.createdAt)
+        if (Number.isNaN(createdAt.getTime())) return false
+        return isSameDay(createdAt, day)
+      })
+
+      const dayCompleted = dayTodos.filter(todo => todo.completed).length
+      const dayTotal = dayTodos.length
+
+      return {
+        day: format(day, 'EEE'),
+        completed: dayCompleted,
+        pending: Math.max(dayTotal - dayCompleted, 0),
+        progress: dayTotal === 0 ? 0 : Math.round((dayCompleted / dayTotal) * 100)
+      }
+    })
+  }, [todos])
 
   // Filtered + searched list
   const visible = todos.filter(t => {
@@ -70,6 +250,7 @@ export default function DashboardPage({ theme, toggleTheme }) {
     const matchSearch = t.title.toLowerCase().includes(search.toLowerCase())
     return matchFilter && matchSearch
   })
+  const canDragReorder = filter === 'all' && search.trim() === '' && !savingOrder
 
   // Add todo — POST /api/todos
   const handleAdd = async (e) => {
@@ -77,10 +258,10 @@ export default function DashboardPage({ theme, toggleTheme }) {
     if (!newTitle.trim()) return
     setSubmitting(true)
     try {
-      const { data } = await api.post('/todos', { title: newTitle.trim(), description: newDesc.trim(), priority, dueDate })
+      const { data } = await api.post('/todos', { title: newTitle.trim(), description: newDesc.trim(), priority, category, dueDate })
       if (data.newTodo) {
-        setTodos(prev => [data.newTodo, ...prev])
-        setNewTitle(''); setNewDesc(''); setPriority('medium'); setDueDate(null)
+        setTodos(prev => [...prev, data.newTodo])
+        setNewTitle(''); setNewDesc(''); setPriority('medium'); setCategory('personal'); setDueDate(null)
         setAllDone(false)
         toast.success('Todo added!')
       }
@@ -114,7 +295,15 @@ export default function DashboardPage({ theme, toggleTheme }) {
     }
 
     try {
-      const { data } = await api.put(`/todos/${id}`, { title: current.title, description: current.description, completed: newCompleted })
+      const { data } = await api.put(`/todos/${id}`, {
+        title: current.title,
+        description: current.description,
+        completed: newCompleted,
+        priority: current.priority,
+        category: current.category || 'personal',
+        dueDate: current.dueDate,
+        order: current.order
+      })
       setTodos(prev => prev.map(t => t._id === id ? { ...t, ...data.todo } : t))
     } catch (err) {
       setTodos(todos)
@@ -144,9 +333,11 @@ export default function DashboardPage({ theme, toggleTheme }) {
         description: editTodo.description,
         completed: editTodo.completed,
         priority: editTodo.priority,
-        dueDate: editTodo.dueDate
+        category: editTodo.category,
+        dueDate: editTodo.dueDate,
+        order: editTodo.order
       })
-      setTodos(todos.map(t => t._id === editTodo._id ? { ...t, ...data.todo, priority: editTodo.priority, dueDate: editTodo.dueDate } : t))
+      setTodos(todos.map(t => t._id === editTodo._id ? { ...t, ...data.todo, priority: editTodo.priority, category: editTodo.category, dueDate: editTodo.dueDate, order: editTodo.order } : t))
       toast.success('Saved!')
       setEditTodo(null)
     } catch (err) {
@@ -156,8 +347,41 @@ export default function DashboardPage({ theme, toggleTheme }) {
 
   // Logout
   const handleLogout = () => {
+    disconnectSocket()
     localStorage.removeItem('token')
     navigate('/login')
+  }
+
+  const handleDragEnd = async ({ active, over }) => {
+    if (!over || active.id === over.id || !canDragReorder) return
+
+    const oldIndex = todos.findIndex(t => t._id === active.id)
+    const newIndex = todos.findIndex(t => t._id === over.id)
+    if (oldIndex === -1 || newIndex === -1) return
+
+    const previousTodos = todos
+    const reorderedTodos = arrayMove(todos, oldIndex, newIndex).map((todo, index) => ({ ...todo, order: index }))
+
+    setTodos(reorderedTodos)
+    setSavingOrder(true)
+
+    try {
+      const payload = {
+        items: reorderedTodos.map(todo => ({
+          id: todo._id,
+          order: todo.order
+        }))
+      }
+      const { data } = await api.patch('/todos/reorder', payload)
+      if (Array.isArray(data.todos)) {
+        setTodos(data.todos)
+      }
+    } catch (err) {
+      setTodos(previousTodos)
+      toast.error('Failed to save new task order.')
+    } finally {
+      setSavingOrder(false)
+    }
   }
 
   const username = user?.username || '...'
@@ -196,6 +420,12 @@ export default function DashboardPage({ theme, toggleTheme }) {
       </nav>
 
       <div className="main">
+
+        {offlineMode && (
+          <div className="offline-banner">
+            Offline mode active. You can view cached tasks. Changes will sync when internet is back.
+          </div>
+        )}
 
         {/* All-done celebration banner */}
         {allDone && (
@@ -255,6 +485,67 @@ export default function DashboardPage({ theme, toggleTheme }) {
           </div>
         </div>
 
+        <div className="charts-grid">
+          <div className="chart-card">
+            <p className="add-card-title">Completed vs Pending</p>
+            {total === 0 ? (
+              <p className="chart-empty">No tasks yet. Add tasks to see the chart.</p>
+            ) : (
+              <ResponsiveContainer width="100%" height={260}>
+                <PieChart>
+                  <Pie
+                    data={completionData}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    outerRadius={85}
+                    innerRadius={45}
+                    paddingAngle={3}
+                  >
+                    {completionData.map((entry) => (
+                      <Cell key={entry.name} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    contentStyle={{
+                      background: 'var(--surface)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 10,
+                      color: 'var(--t1)'
+                    }}
+                  />
+                  <Legend />
+                </PieChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+
+          <div className="chart-card">
+            <p className="add-card-title">Weekly Progress</p>
+            <ResponsiveContainer width="100%" height={260}>
+              <BarChart data={weeklyProgressData} barCategoryGap={18}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis dataKey="day" tick={{ fill: 'var(--t2)', fontSize: 12 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
+                <YAxis tick={{ fill: 'var(--t2)', fontSize: 12 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} allowDecimals={false} />
+                <Tooltip
+                  formatter={(value, name) => [`${value}`, name === 'completed' ? 'Completed' : 'Pending']}
+                  labelFormatter={(label) => `${label}`}
+                  contentStyle={{
+                    background: 'var(--surface)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 10,
+                    color: 'var(--t1)'
+                  }}
+                />
+                <Legend formatter={(value) => (value === 'completed' ? 'Completed' : 'Pending')} />
+                <Bar dataKey="completed" stackId="a" fill="#22c55e" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="pending" stackId="a" fill="#f59e0b" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
         {/* Add Todo */}
         <div className="add-card">
           <p className="add-card-title">✦ New Task</p>
@@ -290,6 +581,18 @@ export default function DashboardPage({ theme, toggleTheme }) {
                 </button>
               ))}
             </div>
+            <div className="priority-row">
+              <label>Category:</label>
+              {CATEGORIES.map(c => (
+                <button
+                  key={c} type="button"
+                  className={`cat-btn ${c} ${category === c ? 'active' : ''}`}
+                  onClick={() => setCategory(c)}
+                >
+                  {CATEGORY_LABELS[c]}
+                </button>
+              ))}
+            </div>
             <div className="add-row !mt-3">
               <DatePicker
                 selected={dueDate}
@@ -313,7 +616,9 @@ export default function DashboardPage({ theme, toggleTheme }) {
               </button>
             ))}
           </div>
-          <span className="task-count">{visible.length} tasks</span>
+          <span className="task-count">
+            {visible.length} tasks {savingOrder ? '• saving order...' : canDragReorder ? '• drag to reorder' : '• clear filter/search to reorder'}
+          </span>
         </div>
 
         {/* Search */}
@@ -337,38 +642,21 @@ export default function DashboardPage({ theme, toggleTheme }) {
               <p className="empty-sub">{search ? `No tasks match "${search}"` : 'Add a task above to get started!'}</p>
             </div>
           ) : (
-            visible.map(todo => {
-              const overdue = todo.dueDate && !todo.completed && isBefore(new Date(todo.dueDate), startOfDay(new Date()));
-              return (
-                <div key={todo._id} className={`todo pri-${todo.priority || 'medium'} ${todo.completed ? 'done' : ''} ${overdue ? 'overdue' : ''}`}>
-                  <div
-                    className={`check ${todo.completed ? 'checked' : ''}`}
-                    onClick={(e) => handleToggle(todo._id, e)}
-                    ref={el => checkRefs.current[todo._id] = el}
-                  >
-                    {todo.completed && '✓'}
-                  </div>
-
-                  <div className="todo-body">
-                    <p className="todo-title">{todo.title}</p>
-                    <div className="todo-meta">
-                      {todo.description && <span className="todo-desc">{todo.description}</span>}
-                      <span className={`badge ${todo.priority || 'medium'}`}>{todo.priority || 'medium'}</span>
-                      {todo.dueDate && (
-                        <span className={`badge ${overdue ? 'high' : ''}`} style={!overdue ? { background: 'var(--surface2)', color: 'var(--t2)', borderColor: 'var(--border)' } : {}}>
-                          📅 {format(new Date(todo.dueDate), 'MMM d, yyyy')}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="todo-actions">
-                    <button className="ico edt" onClick={() => setEditTodo({ ...todo })} title="Edit">✏️</button>
-                    <button className="ico del" onClick={() => handleDelete(todo._id)} title="Delete">🗑</button>
-                  </div>
-                </div>
-              )
-            })
+            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+              <SortableContext items={visible.map(todo => todo._id)} strategy={verticalListSortingStrategy}>
+                {visible.map(todo => (
+                  <SortableTodoItem
+                    key={todo._id}
+                    todo={todo}
+                    draggableEnabled={canDragReorder}
+                    onToggle={handleToggle}
+                    onDelete={handleDelete}
+                    onEdit={(selectedTodo) => setEditTodo({ ...selectedTodo, category: selectedTodo.category || 'personal' })}
+                    checkRefs={checkRefs}
+                  />
+                ))}
+              </SortableContext>
+            </DndContext>
           )}
         </div>
 
@@ -404,6 +692,18 @@ export default function DashboardPage({ theme, toggleTheme }) {
                   onClick={() => setEditTodo({ ...editTodo, priority: p })}
                 >
                   {p === 'high' ? '🔴' : p === 'medium' ? '🟡' : '🟢'} {p}
+                </button>
+              ))}
+            </div>
+            <div className="priority-row">
+              <label>Category:</label>
+              {CATEGORIES.map(c => (
+                <button
+                  key={c} type="button"
+                  className={`cat-btn ${c} ${editTodo.category === c ? 'active' : ''}`}
+                  onClick={() => setEditTodo({ ...editTodo, category: c })}
+                >
+                  {CATEGORY_LABELS[c]}
                 </button>
               ))}
             </div>
